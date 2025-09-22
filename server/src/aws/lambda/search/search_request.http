@@ -1,0 +1,9 @@
+POST https://lilmv6yt5rk7lrqastg7ovpr2y0gjvtu.lambda-url.us-east-2.on.aws/
+Content-Type: application/json
+
+{
+    "coordinates": [
+        [58, -160],
+        [33, -93.4]
+    ]
+}
