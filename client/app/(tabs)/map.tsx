@@ -18,36 +18,24 @@ import AddressInput from "@/components/AddressInput";
 import { StatusBar } from "expo-status-bar";
 import moment from "moment";
 import AppButton from "@/components/AppButton";
-import { getWaypoints, doesPolylineIntersectPolygon } from "../../scripts/routing"
-import hexToRgba from "@/scripts/color";
+import { getWaypoints, doesPolylineIntersectPolygon } from "@/scripts/routing";
 import { FontAwesome, FontAwesome6, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-
-interface Geometry {
-  type: string;
-  coordinates: number[][][];
-}
-
-interface WeatherAlert {
-  id: string;
-  start: string;
-  end: string;
-  updated: string;
-  severity: string;
-  event: string;
-  title: string;
-  message: string;
-  link: string;
-  geometry: Geometry[];
-  min_lat: number;
-  max_lat: number;
-  min_lon: number;
-  max_lon: number;
-}
+import { STORAGE_KEYS } from "@/constants/storage";
+import { SavedRoute } from "@/types/routes";
+import { AlertSummary, WeatherAlert } from "@/types/weather";
+import { getSeverityColor, getSeverityLabel } from "@/scripts/alerts";
 
 interface AlertGroup {
+  id: string;
   title: string;
+  event?: string;
+  severity: string;
+  message?: string;
+  effective?: string;
+  expires?: string;
+  updated?: string;
   polygons: LatLng[][];
   min_lat: number;
   max_lat: number;
@@ -106,7 +94,8 @@ export default function Map() {
     paddingTop: 75,
     paddingBottom: 130,
   });
-  const [saveRoute, setSaveRoute] = useState<boolean>(true);
+  const [savedRouteMeta, setSavedRouteMeta] = useState<SavedRoute | null>(null);
+  const [isRouteSaved, setIsRouteSaved] = useState<boolean>(false);
   const mapViewRef = useRef<MapView | null>(null);
   const [addStops, setAddStops] = useState<boolean>(false);
   const [isAlertActive, setIsAlertActive] = useState(false);
@@ -120,9 +109,43 @@ export default function Map() {
     // Get the route from async storage if it was saved
     const loadRoute = async () => {
       try {
-        const savedRoute = await AsyncStorage.getItem('route');
-        if (savedRoute !== null) {
-          setRoute(JSON.parse(savedRoute));
+        const savedRouteValue = await AsyncStorage.getItem(STORAGE_KEYS.savedRoute);
+
+        if (savedRouteValue) {
+          const parsedRoute: SavedRoute = JSON.parse(savedRouteValue);
+
+          if (parsedRoute && Array.isArray(parsedRoute.coordinates)) {
+            setRoute(parsedRoute.coordinates);
+            setSavedRouteMeta(parsedRoute);
+            setIsRouteSaved(true);
+            return;
+          }
+        }
+
+        const legacyRouteValue = await AsyncStorage.getItem(STORAGE_KEYS.legacyRoute);
+
+        if (legacyRouteValue) {
+          const coordinates = JSON.parse(legacyRouteValue);
+
+          if (Array.isArray(coordinates)) {
+            const migratedRoute: SavedRoute = {
+              id: `legacy-${Date.now()}`,
+              savedAt: new Date().toISOString(),
+              originLabel: 'Previous origin',
+              destinationLabel: 'Previous destination',
+              distanceText: '-',
+              durationText: '-',
+              coordinates,
+              alertSummaries: [],
+            };
+
+            setRoute(coordinates);
+            setSavedRouteMeta(migratedRoute);
+            setIsRouteSaved(true);
+
+            await AsyncStorage.setItem(STORAGE_KEYS.savedRoute, JSON.stringify(migratedRoute));
+            await AsyncStorage.removeItem(STORAGE_KEYS.legacyRoute);
+          }
         }
       } catch (error) {
         console.error('Error loading route:', error);
@@ -241,7 +264,14 @@ export default function Map() {
       let weatherAlertTitle = weatherAlert.title ?? '';
       if (!weatherAlertTitle.includes("Craft") && !weatherAlertTitle.includes("Gale")) {
         let alertGroup: AlertGroup = {
+          id: weatherAlert.id,
           title: weatherAlert.title,
+          event: weatherAlert.event,
+          severity: getSeverityLabel(weatherAlert.severity),
+          message: weatherAlert.message,
+          effective: weatherAlert.start,
+          expires: weatherAlert.end,
+          updated: weatherAlert.updated,
           polygons: [],
           min_lat: 0,
           max_lat: 0,
@@ -280,26 +310,66 @@ export default function Map() {
     setAlertGroups(newAlertGroups);
   }
 
-  // Function to get the severity color with opacity
-  const getSeverityColor = (severity: string, opacity: number = 1): string => {
-    let colorHex: string;
-
-    switch (severity) {
-      case "Minor":
-        colorHex = Colors.alertMinor;
-        break;
-      case "Moderate":
-        colorHex = Colors.alertModerate;
-        break;
-      case "Severe":
-        colorHex = Colors.alertSevere;
-        break;
-      default:
-        colorHex = Colors.alertUnknown;
-        break;
+  const areRoutesEqual = (firstRoute: LatLng[], secondRoute: LatLng[]): boolean => {
+    if (firstRoute.length !== secondRoute.length) {
+      return false;
     }
 
-    return hexToRgba(colorHex, opacity);
+    return firstRoute.every((point, index) => {
+      const comparison = secondRoute[index];
+
+      if (!comparison) {
+        return false;
+      }
+
+      return (
+        Math.abs(point.latitude - comparison.latitude) <= 1e-5 &&
+        Math.abs(point.longitude - comparison.longitude) <= 1e-5
+      );
+    });
+  };
+
+  const findIntersectingPolygon = (
+    points: LatLng[],
+    alertGroup: AlertGroup
+  ): LatLng[] | null => {
+    const intersectsBoundingBox = points.some((coordinate: LatLng) =>
+      isCoordinateInBoundingBox(coordinate, alertGroup)
+    );
+
+    if (!intersectsBoundingBox) {
+      return null;
+    }
+
+    for (const polygon of alertGroup.polygons) {
+      if (polygon && doesPolylineIntersectPolygon(points, polygon)) {
+        return polygon;
+      }
+    }
+
+    return null;
+  };
+
+  const collectIntersectingAlerts = (points: LatLng[]): AlertGroup[] => {
+    const intersections: AlertGroup[] = [];
+
+    alertGroups.forEach((alertGroup) => {
+      if (findIntersectingPolygon(points, alertGroup)) {
+        intersections.push(alertGroup);
+      }
+    });
+
+    return intersections;
+  };
+
+  const buildAlertSummaries = (alerts: AlertGroup[]): AlertSummary[] => {
+    return alerts.map((alert) => ({
+      id: alert.id,
+      title: alert.title,
+      severity: alert.severity,
+      event: alert.event,
+      expires: alert.expires,
+    }));
   };
 
   const isCoordinateInBoundingBox = (
@@ -328,6 +398,10 @@ export default function Map() {
 
           const routeData = parseRouteData(response.data.routes[0]);
           setRoute(routeData.formattedPoints);
+          const matchesSavedRoute =
+            savedRouteMeta != null &&
+            areRoutesEqual(routeData.formattedPoints, savedRouteMeta.coordinates);
+          setIsRouteSaved(matchesSavedRoute);
           setDestinationMarker(routeData.destinationMarker);
           updateTravelInfo(routeData.leg);
           Keyboard.dismiss();
@@ -349,23 +423,41 @@ export default function Map() {
 
   // Save or remove route from AsyncStorage
   const toggleRoute = async () => {
-    if (route.length > 0) {
-      if (saveRoute) {
-        try {
-          await AsyncStorage.setItem('route', JSON.stringify(route));
-          console.log('Success saving route:', route);
-        } catch (error) {
-          console.error('Error saving route:', error);
-        }
+    if (route.length === 0) {
+      return;
+    }
+
+    try {
+      if (isRouteSaved) {
+        await AsyncStorage.removeItem(STORAGE_KEYS.savedRoute);
+        await AsyncStorage.removeItem(STORAGE_KEYS.legacyRoute);
+        setSavedRouteMeta(null);
+        setIsRouteSaved(false);
       } else {
-        try {
-          await AsyncStorage.removeItem('route');
-          console.log(`Removed item with key: ${route}`);
-        } catch (error) {
-          console.error('Error removing item from AsyncStorage', error);
-        }
+        const intersectingAlerts = collectIntersectingAlerts(route);
+        const savedRoutePayload: SavedRoute = {
+          id: `route-${Date.now()}`,
+          savedAt: new Date().toISOString(),
+          originLabel: origin && origin.length > 0 ? origin : 'Current location',
+          destinationLabel:
+            destination && destination.length > 0 ? destination : 'Destination pending',
+          distanceText: milesRemaining,
+          durationText: timeRemaining,
+          arrivalTime,
+          coordinates: route,
+          alertSummaries: buildAlertSummaries(intersectingAlerts),
+        };
+
+        await AsyncStorage.setItem(
+          STORAGE_KEYS.savedRoute,
+          JSON.stringify(savedRoutePayload)
+        );
+        await AsyncStorage.removeItem(STORAGE_KEYS.legacyRoute);
+        setSavedRouteMeta(savedRoutePayload);
+        setIsRouteSaved(true);
       }
-      setSaveRoute(prevState => !prevState);
+    } catch (error) {
+      console.error('Error storing route:', error);
     }
   };
 
@@ -412,34 +504,24 @@ export default function Map() {
 
   const handleIntersections = async (formattedPoints: LatLng[], updateWaypoints: boolean = true): Promise<AlertGroup | null> => {
     for (const alertGroup of alertGroups) {
-      // Check if any point in the route intersects with the bounding box of the alert group
-      const intersectsBoundingBox = formattedPoints.some((coordinate: LatLng) => {
-        return isCoordinateInBoundingBox(coordinate, alertGroup);
-      });
+      const intersectingPolygon = findIntersectingPolygon(formattedPoints, alertGroup);
 
-      if (intersectsBoundingBox) {
-        console.log(`Route intersects with bounding box of alert: ${alertGroup.title}`);
+      if (intersectingPolygon) {
+        console.log(`Route intersects with polygon of alert: ${alertGroup.title}`);
 
-        for (const polygon of alertGroup.polygons) {
-          if (polygon && polygon !== undefined) {
-            const doesIntersect = doesPolylineIntersectPolygon(formattedPoints, polygon);
-            if (doesIntersect) {
-              console.log(`Route intersects with polygon of alert: ${alertGroup.title}`);
-              if (updateWaypoints) {
-                // Set waypoints and mark as intersecting
-                const waypointCoordinates = getWaypoints(formattedPoints, polygon);
-                const waypointPromises = waypointCoordinates.map(async waypoint => {
-                  return await getNearestRoadCoordinates(waypoint);
-                });
+        if (updateWaypoints) {
+          // Set waypoints and mark as intersecting
+          const waypointCoordinates = getWaypoints(formattedPoints, intersectingPolygon);
+          const waypointPromises = waypointCoordinates.map(async (waypoint) => {
+            return await getNearestRoadCoordinates(waypoint);
+          });
 
-                const waypointRoads = await Promise.all(waypointPromises);
-                setWaypoints(waypointRoads);
-                showAlert(alertGroup);
-              }
-              return alertGroup; // Exit the loop if an intersection is found
-            }
-          }
+          const waypointRoads = await Promise.all(waypointPromises);
+          setWaypoints(waypointRoads);
+          showAlert(alertGroup);
         }
+
+        return alertGroup; // Exit the loop if an intersection is found
       }
     }
     return null;
@@ -812,13 +894,21 @@ export default function Map() {
                 }}
               />
               <AppButton
-                title="Save"
-                iconName="bookmark"
-                iconColor={Colors.regular}
+                title={isRouteSaved ? "Saved" : "Save"}
+                iconName={isRouteSaved ? "bookmark" : "bookmark-outline"}
+                iconColor={isRouteSaved ? Colors.background : Colors.regular}
                 iconSize={20}
-                buttonStyle={[styles.buttonBottom, styles.buttonRight]}
-                textStyle={[styles.buttonBottomText, styles.buttonTextRight]}
-                onPress={() => toggleRoute()}
+                buttonStyle={[
+                  styles.buttonBottom,
+                  styles.buttonRight,
+                  isRouteSaved && styles.activeButton,
+                ]}
+                textStyle={[
+                  styles.buttonBottomText,
+                  styles.buttonTextRight,
+                  isRouteSaved && styles.buttonTextRightActive,
+                ]}
+                onPress={toggleRoute}
               />
             </View>
           </>
