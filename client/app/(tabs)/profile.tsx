@@ -1,7 +1,7 @@
 import React, { useState, useCallback, JSX } from 'react';
 import { View, Text, StyleSheet, Image, TouchableOpacity, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
-import { Ionicons, FontAwesome5 } from '@expo/vector-icons';
+import { Ionicons, FontAwesome5, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import { useFocusEffect } from '@react-navigation/native';
@@ -138,6 +138,16 @@ export default function ProfileScreen(): JSX.Element {
           title="Plan a drive"
           icon={<Ionicons name="car-outline" size={20} color={Colors.bold} />}
           onPress={() => router.navigate('/(tabs)/map')}
+        />
+        <ProfileOption
+          title="Saved drives"
+          icon={<MaterialCommunityIcons name="bookmark-outline" size={20} color={Colors.bold} />}
+          onPress={() => router.navigate('/(tabs)/saved-drives')}
+        />
+        <ProfileOption
+          title="Weather alerts"
+          icon={<Ionicons name="warning-outline" size={20} color={Colors.bold} />}
+          onPress={() => router.navigate('/(tabs)/weather-alerts')}
         />
         <ProfileOption
           title="Settings"

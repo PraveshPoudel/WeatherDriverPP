@@ -75,6 +75,16 @@ interface Route {
   legs: Leg[];
 }
 
+interface StoredRoute {
+  id: string;
+  savedAt: string;
+  originLabel: string;
+  destinationLabel: string;
+  distanceText: string;
+  durationText: string;
+  coordinates: LatLng[];
+}
+
 export default function Map() {
   const router = useRouter();
   const weatherAlertData = require("../../assets/data/all_weather_alerts.json");
@@ -120,9 +130,26 @@ export default function Map() {
     // Get the route from async storage if it was saved
     const loadRoute = async () => {
       try {
-        const savedRoute = await AsyncStorage.getItem('route');
-        if (savedRoute !== null) {
-          setRoute(JSON.parse(savedRoute));
+        const storedRoute = await AsyncStorage.getItem('savedRoute');
+
+        if (storedRoute) {
+          const parsedRoute = JSON.parse(storedRoute) as StoredRoute;
+
+          if (parsedRoute && Array.isArray(parsedRoute.coordinates)) {
+            setRoute(parsedRoute.coordinates);
+            setSaveRoute(false);
+            return;
+          }
+        }
+
+        const legacyRoute = await AsyncStorage.getItem('route');
+
+        if (legacyRoute) {
+          const coordinates = JSON.parse(legacyRoute);
+          if (Array.isArray(coordinates)) {
+            setRoute(coordinates);
+            setSaveRoute(false);
+          }
         }
       } catch (error) {
         console.error('Error loading route:', error);
@@ -352,14 +379,26 @@ export default function Map() {
     if (route.length > 0) {
       if (saveRoute) {
         try {
+          const payload: StoredRoute = {
+            id: `route-${Date.now()}`,
+            savedAt: new Date().toISOString(),
+            originLabel: origin || 'Current location',
+            destinationLabel: destination || 'Selected destination',
+            distanceText: milesRemaining,
+            durationText: timeRemaining,
+            coordinates: route,
+          };
+
           await AsyncStorage.setItem('route', JSON.stringify(route));
-          console.log('Success saving route:', route);
+          await AsyncStorage.setItem('savedRoute', JSON.stringify(payload));
+          console.log('Success saving route:', payload);
         } catch (error) {
           console.error('Error saving route:', error);
         }
       } else {
         try {
           await AsyncStorage.removeItem('route');
+          await AsyncStorage.removeItem('savedRoute');
           console.log(`Removed item with key: ${route}`);
         } catch (error) {
           console.error('Error removing item from AsyncStorage', error);
